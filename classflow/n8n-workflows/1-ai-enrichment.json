@@ -1,0 +1,170 @@
+{
+  "name": "ClassFlow – AI Enrichment Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 30 }] }
+      },
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "assignments",
+        "returnAll": false,
+        "limit": 20,
+        "filters": {
+          "conditions": [
+            { "keyName": "is_enriched", "condition": "equal", "keyValue": "false" },
+            { "keyName": "description", "condition": "isNotNull" }
+          ]
+        },
+        "additionalFields": {
+          "select": "id, title, description, work_type, course_id"
+        }
+      },
+      "name": "Get Unenriched Assignments",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {},
+      "name": "Split Assignments",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.description }}",
+              "operation": "isNotEmpty"
+            }
+          ],
+          "number": [
+            {
+              "value1": "={{ $json.description.length }}",
+              "operation": "largerEqual",
+              "value2": 30
+            }
+          ]
+        }
+      },
+      "name": "Check Description Length",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.featherless.ai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"moonshotai/Kimi-K2.5\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a student assistant. Analyze this assignment and return valid JSON with this exact structure: {\\\"key_topics\\\":[\\\"topic1\\\",\\\"topic2\\\"],\\\"estimated_hours\\\":2,\\\"difficulty\\\":\\\"easy|medium|hard\\\",\\\"study_tips\\\":[\\\"tip1\\\",\\\"tip2\\\"],\\\"breakdown_steps\\\":[\\\"step1\\\",\\\"step2\\\",\\\"step3\\\"]}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Title: {{ $json.title }}\\nType: {{ $json.work_type }}\\nDescription: {{ $json.description }}\"\n    }\n  ],\n  \"temperature\": 0.5\n}"
+      },
+      "name": "Generate AI Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -60],
+      "credentials": { "httpHeaderAuth": { "id": "FEATHERLESS_CREDENTIAL_ID", "name": "Featherless API" } },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices[0].message.content;\ntry {\n  return [{ json: JSON.parse(raw) }];\n} catch {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  if (match) return [{ json: JSON.parse(match[0]) }];\n  throw new Error('Could not parse AI response');\n}"
+      },
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -120]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "assignments",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "keyValue": "={{ $('Split Assignments').item.json.id }}" }
+          ]
+        },
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "is_enriched", "fieldValue": "true" },
+            { "fieldName": "ai_enrichment", "fieldValue": "={{ JSON.stringify($json) }}" },
+            { "fieldName": "enrichment_error", "fieldValue": "" }
+          ]
+        }
+      },
+      "name": "Store AI Output",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, -120],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const error = $input.first().json;\nreturn [{ json: { assignment_id: $('Split Assignments').item.json.id, error: JSON.stringify(error) } }];"
+      },
+      "name": "Handle AI Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 60]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "assignments",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "keyValue": "={{ $json.assignment_id }}" }
+          ]
+        },
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "enrichment_error", "fieldValue": "={{ $json.error }}" }
+          ]
+        }
+      },
+      "name": "Log AI Errors",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, 60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": { "main": [[{ "node": "Get Unenriched Assignments", "type": "main", "index": 0 }]] },
+    "Get Unenriched Assignments": { "main": [[{ "node": "Split Assignments", "type": "main", "index": 0 }]] },
+    "Split Assignments": { "main": [[{ "node": "Check Description Length", "type": "main", "index": 0 }]] },
+    "Check Description Length": {
+      "main": [
+        [{ "node": "Generate AI Enrichment", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Generate AI Enrichment": {
+      "main": [
+        [{ "node": "Parse AI Response", "type": "main", "index": 0 }],
+        [{ "node": "Handle AI Errors", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AI Response": { "main": [[{ "node": "Store AI Output", "type": "main", "index": 0 }]] },
+    "Handle AI Errors": { "main": [[{ "node": "Log AI Errors", "type": "main", "index": 0 }]] }
+  }
+}

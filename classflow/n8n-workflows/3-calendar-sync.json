@@ -1,0 +1,167 @@
+{
+  "name": "ClassFlow – Calendar Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "INSERT_OR_UPDATE",
+        "channel": "assignments_change",
+        "additionalFields": {}
+      },
+      "name": "Assignment Changed Trigger",
+      "type": "n8n-nodes-base.supabaseTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } },
+      "notes": "Fires on assignment INSERT or UPDATE"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "assignments",
+        "returnAll": false,
+        "limit": 50,
+        "filters": {
+          "conditions": [
+            { "keyName": "user_id", "condition": "equal", "keyValue": "={{ $json.record.user_id }}" },
+            { "keyName": "submission_state", "condition": "in", "keyValue": "NEW,CREATED,RECLAIMED_BY_STUDENT" }
+          ]
+        },
+        "additionalFields": {
+          "select": "id, title, description, due_date, alternate_link, calendar_event_id, courses(name)"
+        }
+      },
+      "name": "Get Upcoming Assignments",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {},
+      "name": "Split Assignments",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.due_date }}",
+              "operation": "isNotEmpty"
+            },
+            {
+              "value1": "={{ $json.submission_state }}",
+              "operation": "notEqual",
+              "value2": "TURNED_IN"
+            }
+          ]
+        }
+      },
+      "name": "Filter Incomplete",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.calendar_event_id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check Event Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "calendar": "primary",
+        "start": "={{ $json.due_date }}",
+        "end": "={{ new Date(new Date($json.due_date).getTime() + 3600000).toISOString() }}",
+        "additionalFields": {
+          "summary": "=[{{ $json.courses?.name || 'Class' }}] {{ $json.title }}",
+          "description": "={{ $json.description ? $json.description.slice(0, 500) : '' }}{{ $json.alternate_link ? '\\n\\nOpen: ' + $json.alternate_link : '' }}",
+          "reminders": {
+            "useDefault": false,
+            "overrides": [
+              { "method": "popup", "minutes": 60 },
+              { "method": "popup", "minutes": 1440 }
+            ]
+          }
+        }
+      },
+      "name": "Create Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.2,
+      "position": [1100, -80],
+      "credentials": { "googleCalendarOAuth2Api": { "id": "GCAL_CREDENTIAL_ID", "name": "ClassFlow Google Calendar" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "calendar": "primary",
+        "eventId": "={{ $json.calendar_event_id }}",
+        "updateFields": {
+          "summary": "=[{{ $json.courses?.name || 'Class' }}] {{ $json.title }}",
+          "description": "={{ $json.description ? $json.description.slice(0, 500) : '' }}{{ $json.alternate_link ? '\\n\\nOpen: ' + $json.alternate_link : '' }}",
+          "start": "={{ $json.due_date }}",
+          "end": "={{ new Date(new Date($json.due_date).getTime() + 3600000).toISOString() }}"
+        }
+      },
+      "name": "Update Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.2,
+      "position": [1100, 80],
+      "credentials": { "googleCalendarOAuth2Api": { "id": "GCAL_CREDENTIAL_ID", "name": "ClassFlow Google Calendar" } }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "assignments",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "condition": "equal", "keyValue": "={{ $('Split Assignments').item.json.id }}" }
+          ]
+        },
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "calendar_event_id", "fieldValue": "={{ $json.id || $('Split Assignments').item.json.calendar_event_id }}" },
+            { "fieldName": "calendar_synced_at", "fieldValue": "={{ new Date().toISOString() }}" }
+          ]
+        }
+      },
+      "name": "Mark Calendar Synced",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    }
+  ],
+  "connections": {
+    "Assignment Changed Trigger": { "main": [[{ "node": "Get Upcoming Assignments", "type": "main", "index": 0 }]] },
+    "Get Upcoming Assignments": { "main": [[{ "node": "Split Assignments", "type": "main", "index": 0 }]] },
+    "Split Assignments": { "main": [[{ "node": "Filter Incomplete", "type": "main", "index": 0 }]] },
+    "Filter Incomplete": {
+      "main": [
+        [{ "node": "Check Event Exists", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Check Event Exists": {
+      "main": [
+        [{ "node": "Update Calendar Event", "type": "main", "index": 0 }],
+        [{ "node": "Create Calendar Event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Calendar Event": { "main": [[{ "node": "Mark Calendar Synced", "type": "main", "index": 0 }]] },
+    "Update Calendar Event": { "main": [[{ "node": "Mark Calendar Synced", "type": "main", "index": 0 }]] }
+  }
+}

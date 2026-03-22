@@ -1,0 +1,305 @@
+{
+  "name": "ClassFlow – Auto Classroom Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] }
+      },
+      "name": "Auto Sync Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 120]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "classflow-sync",
+        "responseMode": "responseNode"
+      },
+      "name": "Manual Sync Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, -60]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "google_tokens",
+        "returnAll": true,
+        "additionalFields": {
+          "select": "user_id, access_token, refresh_token, token_expires_at, scopes"
+        }
+      },
+      "name": "Get Active Users",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {},
+      "name": "Split Users",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://classroom.googleapis.com/v1/courses",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.access_token }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "studentId", "value": "me" },
+            { "name": "courseStates", "value": "ACTIVE" }
+          ]
+        }
+      },
+      "name": "Fetch User Courses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "courses"
+      },
+      "name": "Split Courses",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [880, -60]
+    },
+    {
+      "parameters": {
+        "jsCode": "const course = $input.first().json;\nconst userId = $('Split Users').item.json.user_id;\nreturn [{\n  json: {\n    user_id: userId,\n    google_course_id: course.id,\n    name: course.name,\n    section: course.section || null,\n    description: course.descriptionHeading || null,\n    course_state: course.courseState,\n    alternate_link: course.alternateLink,\n    synced_at: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Normalize Course Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -180]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "tableId": "courses",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "user_id", "fieldValue": "={{ $json.user_id }}" },
+            { "fieldName": "google_course_id", "fieldValue": "={{ $json.google_course_id }}" },
+            { "fieldName": "name", "fieldValue": "={{ $json.name }}" },
+            { "fieldName": "section", "fieldValue": "={{ $json.section }}" },
+            { "fieldName": "description", "fieldValue": "={{ $json.description }}" },
+            { "fieldName": "course_state", "fieldValue": "={{ $json.course_state }}" },
+            { "fieldName": "alternate_link", "fieldValue": "={{ $json.alternate_link }}" },
+            { "fieldName": "synced_at", "fieldValue": "={{ $json.synced_at }}" }
+          ]
+        },
+        "additionalFields": {
+          "conflictFields": "user_id,google_course_id"
+        }
+      },
+      "name": "Upsert Courses",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, -180],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://classroom.googleapis.com/v1/courses/{{ $json.id }}/courseWork",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('Split Users').item.json.access_token }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "orderBy", "value": "dueDate asc" }
+          ]
+        }
+      },
+      "name": "Fetch Coursework",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "courseWork"
+      },
+      "name": "Split Coursework",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const work = $input.first().json;\nconst userId = $('Split Users').item.json.user_id;\nconst courseId = $('Split Courses').item.json.id;\n\nlet dueDate = null;\nif (work.dueDate) {\n  const { year, month, day } = work.dueDate;\n  const time = work.dueTime || { hours: 23, minutes: 59 };\n  dueDate = new Date(year, month - 1, day, time.hours || 0, time.minutes || 0).toISOString();\n}\n\nreturn [{\n  json: {\n    user_id: userId,\n    google_course_id: courseId,\n    google_coursework_id: work.id,\n    title: work.title,\n    description: work.description || null,\n    due_date: dueDate,\n    max_points: work.maxPoints || null,\n    state: work.state,\n    alternate_link: work.alternateLink,\n    work_type: work.workType,\n    synced_at: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Normalize Assignment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, -60]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://classroom.googleapis.com/v1/courses/{{ $('Split Courses').item.json.id }}/courseWork/{{ $json.id }}/studentSubmissions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('Split Users').item.json.access_token }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "userId", "value": "me" }
+          ]
+        }
+      },
+      "name": "Fetch Submissions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 60],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const submissions = $input.first().json;\nconst assignmentData = $('Normalize Assignment Data').first().json;\nassignmentData.submission_state = submissions.studentSubmissions?.[0]?.state || 'NEW';\nreturn [{ json: assignmentData }];"
+      },
+      "name": "Normalize Submission Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 60]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "tableId": "assignments",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "user_id", "fieldValue": "={{ $json.user_id }}" },
+            { "fieldName": "google_coursework_id", "fieldValue": "={{ $json.google_coursework_id }}" },
+            { "fieldName": "title", "fieldValue": "={{ $json.title }}" },
+            { "fieldName": "description", "fieldValue": "={{ $json.description }}" },
+            { "fieldName": "due_date", "fieldValue": "={{ $json.due_date }}" },
+            { "fieldName": "max_points", "fieldValue": "={{ $json.max_points }}" },
+            { "fieldName": "state", "fieldValue": "={{ $json.state }}" },
+            { "fieldName": "submission_state", "fieldValue": "={{ $json.submission_state }}" },
+            { "fieldName": "alternate_link", "fieldValue": "={{ $json.alternate_link }}" },
+            { "fieldName": "work_type", "fieldValue": "={{ $json.work_type }}" },
+            { "fieldName": "synced_at", "fieldValue": "={{ $json.synced_at }}" }
+          ]
+        },
+        "additionalFields": {
+          "conflictFields": "user_id,google_coursework_id"
+        }
+      },
+      "name": "Upsert Assignments",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1980, 60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "automation_logs",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "workflow_name", "fieldValue": "classroom_sync" },
+            { "fieldName": "status", "fieldValue": "completed" },
+            { "fieldName": "details", "fieldValue": "={{ JSON.stringify({ users: $('Split Users').all().length }) }}" },
+            { "fieldName": "completed_at", "fieldValue": "={{ new Date().toISOString() }}" }
+          ]
+        }
+      },
+      "name": "Log Sync Status",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2200, 60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: JSON.stringify($input.first().json) } }];"
+      },
+      "name": "Handle API Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 120]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "automation_logs",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "workflow_name", "fieldValue": "classroom_sync" },
+            { "fieldName": "status", "fieldValue": "failed" },
+            { "fieldName": "details", "fieldValue": "={{ JSON.stringify({ error: $json.error, user_id: $('Split Users').item.json.user_id }) }}" },
+            { "fieldName": "completed_at", "fieldValue": "={{ new Date().toISOString() }}" }
+          ]
+        }
+      },
+      "name": "Log Sync Errors",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1100, 120],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    }
+  ],
+  "connections": {
+    "Auto Sync Schedule": { "main": [[{ "node": "Get Active Users", "type": "main", "index": 0 }]] },
+    "Manual Sync Trigger": { "main": [[{ "node": "Get Active Users", "type": "main", "index": 0 }]] },
+    "Get Active Users": { "main": [[{ "node": "Split Users", "type": "main", "index": 0 }]] },
+    "Split Users": { "main": [[{ "node": "Fetch User Courses", "type": "main", "index": 0 }]] },
+    "Fetch User Courses": {
+      "main": [
+        [{ "node": "Split Courses", "type": "main", "index": 0 }],
+        [{ "node": "Handle API Errors", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Courses": {
+      "main": [
+        [
+          { "node": "Normalize Course Data", "type": "main", "index": 0 },
+          { "node": "Fetch Coursework", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Normalize Course Data": { "main": [[{ "node": "Upsert Courses", "type": "main", "index": 0 }]] },
+    "Fetch Coursework": { "main": [[{ "node": "Split Coursework", "type": "main", "index": 0 }]] },
+    "Split Coursework": {
+      "main": [
+        [
+          { "node": "Normalize Assignment Data", "type": "main", "index": 0 },
+          { "node": "Fetch Submissions", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Normalize Assignment Data": { "main": [[{ "node": "Upsert Assignments", "type": "main", "index": 0 }]] },
+    "Fetch Submissions": { "main": [[{ "node": "Normalize Submission Data", "type": "main", "index": 0 }]] },
+    "Normalize Submission Data": { "main": [[{ "node": "Upsert Assignments", "type": "main", "index": 0 }]] },
+    "Upsert Assignments": { "main": [[{ "node": "Log Sync Status", "type": "main", "index": 0 }]] },
+    "Handle API Errors": { "main": [[{ "node": "Log Sync Errors", "type": "main", "index": 0 }]] }
+  }
+}

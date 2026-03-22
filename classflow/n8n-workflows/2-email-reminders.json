@@ -1,0 +1,167 @@
+{
+  "name": "ClassFlow – Assignment Email Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "INSERT",
+        "channel": "assignments_insert",
+        "additionalFields": {}
+      },
+      "name": "Assignment Created Trigger",
+      "type": "n8n-nodes-base.supabaseTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } },
+      "notes": "Alternative: Use Supabase Webhook pointed at n8n webhook URL if trigger node unavailable"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "assignments",
+        "returnAll": false,
+        "limit": 20,
+        "filters": {
+          "conditions": [
+            { "keyName": "user_id", "condition": "equal", "keyValue": "={{ $json.record.user_id }}" },
+            { "keyName": "submission_state", "condition": "in", "keyValue": "NEW,CREATED,RECLAIMED_BY_STUDENT" }
+          ]
+        },
+        "additionalFields": {
+          "select": "title, due_date, urgency_level, alternate_link, courses(name)",
+          "order": "due_date.asc"
+        }
+      },
+      "name": "Get Due Soon Assignments",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "user_profiles",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "condition": "equal", "keyValue": "={{ $('Assignment Created Trigger').first().json.record.user_id }}" }
+          ]
+        }
+      },
+      "name": "Get User Profile",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [440, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.email_reminders_enabled }}",
+              "value2": true
+            }
+          ],
+          "string": [
+            {
+              "value1": "={{ $json.email }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Filter Enabled Users",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('Get User Profile').first().json;\nconst assignments = $('Get Due Soon Assignments').all().map(i => i.json);\nconst newTitle = $('Assignment Created Trigger').first().json.record.title;\nconst firstName = (profile.full_name || '').split(' ')[0] || 'there';\n\nconst rows = assignments.map(a => \n  `<tr><td style=\"padding:8px;border-bottom:1px solid #eee\"><a href=\"${a.alternate_link}\" style=\"color:#4F46E5\">${a.title}</a></td><td style=\"padding:8px;border-bottom:1px solid #eee;color:#666\">${a.courses?.name || ''}</td><td style=\"padding:8px;border-bottom:1px solid #eee;color:#666\">${a.due_date ? new Date(a.due_date).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : ''}</td></tr>`\n).join('');\n\nconst html = `<div style=\"font-family:system-ui,sans-serif;max-width:600px;margin:0 auto\">\n  <h2 style=\"color:#1a1a2e\">Hey ${firstName}!</h2>\n  <p style=\"color:#666\">\"${newTitle}\" was just assigned. You have <strong>${assignments.length}</strong> assignment${assignments.length > 1 ? 's' : ''} coming up:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${rows}</table>\n  <p style=\"margin-top:24px;color:#999;font-size:12px\">Sent by ClassFlow</p>\n</div>`;\n\nreturn [{\n  json: {\n    to: profile.email,\n    subject: `New assignment: ${newTitle}`,\n    html\n  }\n}];"
+      },
+      "name": "Generate Email Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -60]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}"
+      },
+      "name": "Send Reminder Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, -60],
+      "credentials": { "gmailOAuth2": { "id": "GMAIL_CREDENTIAL_ID", "name": "ClassFlow Gmail" } },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "email_logs",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "user_id", "fieldValue": "={{ $('Assignment Created Trigger').first().json.record.user_id }}" },
+            { "fieldName": "email_type", "fieldValue": "assignment_notification" },
+            { "fieldName": "status", "fieldValue": "sent" }
+          ]
+        }
+      },
+      "name": "Log Reminder Sent",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, -120],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: JSON.stringify($input.first().json) } }];"
+      },
+      "name": "Handle Email Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 60]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "email_logs",
+        "fieldsToSend": {
+          "fieldValues": [
+            { "fieldName": "user_id", "fieldValue": "={{ $('Assignment Created Trigger').first().json.record.user_id }}" },
+            { "fieldName": "email_type", "fieldValue": "assignment_notification" },
+            { "fieldName": "status", "fieldValue": "failed" },
+            { "fieldName": "error_message", "fieldValue": "={{ $json.error }}" }
+          ]
+        }
+      },
+      "name": "Log Email Errors",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, 60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_CREDENTIAL_ID", "name": "ClassFlow Supabase" } }
+    }
+  ],
+  "connections": {
+    "Assignment Created Trigger": { "main": [[{ "node": "Get Due Soon Assignments", "type": "main", "index": 0 }]] },
+    "Get Due Soon Assignments": { "main": [[{ "node": "Get User Profile", "type": "main", "index": 0 }]] },
+    "Get User Profile": { "main": [[{ "node": "Filter Enabled Users", "type": "main", "index": 0 }]] },
+    "Filter Enabled Users": {
+      "main": [
+        [{ "node": "Generate Email Body", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Generate Email Body": { "main": [[{ "node": "Send Reminder Email", "type": "main", "index": 0 }]] },
+    "Send Reminder Email": {
+      "main": [
+        [{ "node": "Log Reminder Sent", "type": "main", "index": 0 }],
+        [{ "node": "Handle Email Errors", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle Email Errors": { "main": [[{ "node": "Log Email Errors", "type": "main", "index": 0 }]] }
+  }
+}
